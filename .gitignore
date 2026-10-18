@@ -1,0 +1,6 @@
+# secrets and personal state, never commit
+.env
+config.json
+state/
+.profile/
+node_modules/
