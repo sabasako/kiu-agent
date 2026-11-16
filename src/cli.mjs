@@ -7,11 +7,14 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { HOME, ENV_FILE, STATE, readConfig, writeConfig, writeSecret } from './config.mjs';
 import { call, lms, guardMode, BlockedEndpointError } from './api.mjs';
-import { login, savedToken } from './login.mjs';
+import { login, savedToken, loginStats } from './login.mjs';
 import { setupPasskey } from './setup-passkey.mjs';
-import { loadPasskey } from './browser.mjs';
+import { loadPasskey, log } from './browser.mjs';
 import { READ_ONLY } from './endpoints.mjs';
 import { discover } from './discover.mjs';
+import { acquireLock } from './lock.mjs';
+import { appendAuthLog, readAuthLog, readCounter, summarize } from './auth-log.mjs';
+import { plain } from './text.mjs';
 
 const HELP = `kiu - KIU LMS for agents
 
@@ -33,14 +36,22 @@ const HELP = `kiu - KIU LMS for agents
   raw <GET|POST> <path> [json-body]   any endpoint, guard applies
   snapshot                  call every read endpoint once -> state/snapshot.json
   discover                  re-read the live LMS code, report new/changed endpoints
+  auth-log [days]           how runs signed in over the last days (default 14)
 
   filter = part of a course or group name, e.g. "software" or "seminar"
-  --json on any data command prints raw JSON instead of text`;
+  --json on any data command prints raw JSON instead of text
+  --text with --json, adds a readable \`text\` next to the HTML of descriptions and announcements
+
+  Commands that log in or call the LMS wait for any other kiu run on the same state folder
+  (up to 5 min), and append a line to state/auth-log.jsonl ($KIU_SOURCE names the caller).`;
 
 const args = process.argv.slice(2);
 const flag = (name) => { const i = args.indexOf(name); if (i === -1) return null; args.splice(i, 1); return true; };
 const opt = (name) => { const i = args.indexOf(name); if (i === -1) return null; const v = args[i + 1]; args.splice(i, 2); return v; };
 const asJson = flag('--json');
+const withText = flag('--text');
+// --text: the readable text of an HTML field, next to it (`text`), for scripts that read --json
+const addText = (row, html) => (withText ? { ...row, text: plain(html) } : row);
 const out = (data, text) => console.log(asJson || !text ? JSON.stringify(data, null, 2) : text());
 
 // Fields never shown to the agent; they add nothing and are sensitive.
@@ -72,7 +83,7 @@ async function assignments(filter) {
   for (const g of await groups(filter)) {
     const res = await call('POST', '/lms/learningCourses/group/getAssignmentList', { ...ids(g), user_type: 'student' });
     for (const a of res.data ?? []) {
-      rows.push({
+      rows.push(addText({
         id: a.id,
         course: courseLabel(g),
         title: a.title,
@@ -84,7 +95,7 @@ async function assignments(filter) {
         score: a.student_score,
         files: (a.file_urls ? String(a.file_urls).split(',') : []).filter(Boolean),
         description: a.description,
-      });
+      }, a.description));
     }
   }
   return rows.sort((x, y) => x.dueAt - y.dueAt);
@@ -96,14 +107,16 @@ const fmtAssignment = (a) => {
   return `#${a.id}  ${a.due}  ${a.course}: ${a.title} (week ${a.week}) - ${status}${score}${a.files.length ? `\n      files: ${a.files.join(' ')}` : ''}`;
 };
 
-async function listPerGroup(endpoint, filter, fmt) {
+async function listPerGroup(endpoint, filter, fmt, htmlOf) {
   const result = [];
   for (const g of await groups(filter)) {
     const res = await call('POST', endpoint, ids(g));
-    for (const item of res.data ?? []) result.push({ course: courseLabel(g), ...item });
+    for (const item of res.data ?? []) result.push(addText({ course: courseLabel(g), ...item }, htmlOf(item)));
   }
   out(redact(result), () => result.map(fmt).join('\n') || '(none)');
 }
+
+const oneLine = (html) => plain(html).replace(/\s+/g, ' ');
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const pad = (n) => String(n).padStart(2, '0');
@@ -166,17 +179,20 @@ const commands = {
   async assignment() {
     if (!args[1]) throw new Error('usage: assignment <id>');
     const res = await call('POST', '/lms/learningCourses/group/getAssignment', { assignment_id: Number(args[1]) });
-    out(redact(res.data ?? res));
+    const data = res.data ?? res;
+    out(redact(res.data ? addText(data, data.description) : data));
   },
 
   async materials() {
     await listPerGroup('/lms/learningCourses/group/getMaterialList', args[1],
-      (m) => `${m.created_at?.slice(0, 10)}  ${m.course}: ${m.title}${m.description ? ` - ${m.description.replace(/<[^>]+>/g, '').slice(0, 200)}` : ''}${m.file_urls?.length ? `\n      files: ${m.file_urls.join(' ')}` : ''}`);
+      (m) => `${m.created_at?.slice(0, 10)}  ${m.course}: ${m.title}${m.description ? ` - ${oneLine(m.description).slice(0, 200)}` : ''}${m.file_urls?.length ? `\n      files: ${m.file_urls.join(' ')}` : ''}`,
+      (m) => m.description);
   },
 
   async announcements() {
     await listPerGroup('/lms/learningCourses/group/announcementList', args[1],
-      (a) => `${a.created_at?.slice(0, 10)}  ${a.course}: ${String(a.title).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400)}${a.file_urls?.length ? `\n      files: ${a.file_urls.join(' ')}` : ''}${a.comments?.length ? `\n      ${a.comments.length} comment(s)` : ''}`);
+      (a) => `${a.created_at?.slice(0, 10)}  ${a.course}: ${oneLine(a.title).slice(0, 400)}${a.file_urls?.length ? `\n      files: ${a.file_urls.join(' ')}` : ''}${a.comments?.length ? `\n      ${a.comments.length} comment(s)` : ''}`,
+      (a) => a.title); // the LMS keeps the whole announcement in `title`, as HTML
   },
 
   async timetable() {
@@ -216,6 +232,12 @@ const commands = {
     console.log(JSON.stringify({ status: res.status, body: redact(res.json ?? res.text) }, null, 2));
   },
 
+  async 'auth-log'() {
+    const days = Number(args[1] ?? 14);
+    if (!(days > 0)) throw new Error('usage: auth-log [days]');
+    console.log(summarize(readAuthLog(AUTH_LOG, { days }), { days }));
+  },
+
   async discover() {
     const { report, file } = await discover();
     console.log(`${report.endpointsInBundle} endpoints in ${report.bundleFiles} bundle files -> ${file}`);
@@ -242,10 +264,59 @@ const commands = {
   },
 };
 
+// Commands that can sign in with the passkey or call the LMS: they hold the run lock (src/lock.mjs:
+// two runs signing at once break the passkey counter) and write one auth-log line each.
+const LOCKED = new Set(['setup-passkey', 'login', 'me', 'courses', 'due', 'assignments', 'assignment', 'materials',
+  'announcements', 'timetable', 'grades', 'raw', 'snapshot']);
+const LOCK = path.join(STATE, 'run.lock');
+const AUTH_LOG = path.join(STATE, 'auth-log.jsonl');
+const COUNTER = path.join(STATE, 'passkey-counter.json');
+
+async function runLocked(cmd) {
+  const started = Date.now();
+  let lock = null, counterBefore = readCounter(COUNTER), logged = false;
+  const writeLog = (error, exit) => {
+    if (logged) return;
+    logged = true;
+    try {
+      appendAuthLog(AUTH_LOG, {
+        at: new Date().toISOString(), source: process.env.KIU_SOURCE || 'cli', cmd, ok: !error, exit,
+        secs: +((Date.now() - started) / 1000).toFixed(1), ...(lock?.waitedMs >= 1000 && { waitedSecs: +(lock.waitedMs / 1000).toFixed(1) }),
+        passkeyLogin: loginStats.ok > 0, ...(loginStats.failed && { loginFailed: true }),
+        counterBefore, counter: readCounter(COUNTER), ...(error && { error: String(error.message ?? error).slice(0, 200) }),
+      });
+    } catch (e) { log(`auth log not written: ${e.message}`); }
+  };
+  try {
+    lock = await acquireLock(LOCK, {
+      cmd,
+      onWait: (o) => log(`WAIT another kiu run${o ? ` (pid ${o.pid}, ${o.cmd})` : ''} is using the LMS, waiting up to 5 min`),
+    });
+  } catch (e) {
+    writeLog(e, 1); // a run that never got the lock is worth a line too
+    throw e;
+  }
+  counterBefore = readCounter(COUNTER); // the other run may have moved it while we waited
+  // a process.exit() mid-run (the signal handler in login.mjs) still leaves a line
+  const onExit = (code) => writeLog(new Error(`exited with code ${code} during the run`), code);
+  process.on('exit', onExit);
+  try {
+    await commands[cmd]();
+    writeLog(null, 0);
+  } catch (e) {
+    writeLog(e, 1);
+    throw e;
+  } finally {
+    process.off('exit', onExit);
+    lock.release();
+  }
+}
+
 const cmd = args[0] ?? 'help';
 try {
   if (!commands[cmd]) throw new Error(`unknown command "${cmd}", see: kiu help`);
-  await commands[cmd]();
+  if (LOCKED.has(cmd)) await runLocked(cmd);
+  else await commands[cmd]();
 } catch (e) {
   console.error(e instanceof BlockedEndpointError ? e.message : `ERROR ${e.message}`);
   process.exit(1);

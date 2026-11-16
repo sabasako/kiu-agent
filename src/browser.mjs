@@ -16,6 +16,7 @@ import { STATE, PROFILE, DEBUG } from './config.mjs';
 const COUNTER = path.join(STATE, 'passkey-counter.json');
 export const log = (line) => process.stderr.write(line + '\n');
 const MS_HOSTS = ['login.microsoftonline.com', 'login.microsoft.com', 'login.live.com'];
+const REFUSED_AFTER_MS = 20_000; // a "Try again" still up after this long is a real refusal
 const SUBMIT = ['#idSIButton9', 'button[type=submit]', 'input[type=submit]', '[data-testid="primaryButton"]'];
 
 let lastState = '';
@@ -117,6 +118,7 @@ export async function signIn(page, { mode, done, timeoutMs = 4 * 60 * 1000 }) {
 
   let shownNumber = null;
   let unknownTicks = 0;
+  let tryAgainSince = null;
   let resends = 0;
   const deadline = Date.now() + timeoutMs;
 
@@ -141,11 +143,12 @@ export async function signIn(page, { mode, done, timeoutMs = 4 * 60 * 1000 }) {
     }
     if (url.pathname.includes('/fido')) {
       if (mode === 'passkey') {
-        // the virtual authenticator answers on its own; "Try again" means it was refused
-        if (await page.locator('#idSIButton9:has-text("Try again"), input[value="Try again"]').isVisible().catch(() => false)) {
-          throw new Error('Microsoft refused the passkey');
-        }
-        state('passkey -> signing');
+        // the virtual authenticator answers on its own. "Try again" also flashes up while an
+        // accepted passkey is redirecting back, so it only counts as a refusal if it stays.
+        const tryAgain = await page.locator('#idSIButton9:has-text("Try again"), input[value="Try again"]').isVisible().catch(() => false);
+        tryAgainSince = tryAgain ? tryAgainSince ?? Date.now() : null;
+        if (tryAgainSince && Date.now() - tryAgainSince > REFUSED_AFTER_MS) throw new Error('Microsoft refused the passkey');
+        state(tryAgain ? 'passkey -> "Try again" showing, waiting' : 'passkey -> signing');
         continue;
       }
       state('passkey prompt -> back');

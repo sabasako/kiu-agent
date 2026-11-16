@@ -10,14 +10,19 @@ import { READ_ONLY, endpointOf } from './endpoints.mjs';
 const LMS = 'https://lms.kiu.edu.ge';
 const TOKEN = path.join(STATE, 'token.json');
 
+// what this process did, for the auth log (src/auth-log.mjs)
+export const loginStats = { ok: 0, failed: 0 };
+
 export function savedToken() {
   return existsSync(TOKEN) ? JSON.parse(readFileSync(TOKEN, 'utf8')).token : null;
 }
 
-const lmsToken = async (page) => {
-  if (!page.url().startsWith(LMS)) return null;
-  return page.evaluate(() => localStorage.getItem('Student-Token')).catch(() => null);
-};
+// Ask the page itself where it is: page.url() can still name Microsoft's last page after the
+// redirect has already loaded the LMS and stored its token.
+const lmsToken = (page) => page.evaluate(
+  (host) => (location.host === host ? localStorage.getItem('Student-Token') : null),
+  new URL(LMS).host,
+).catch(() => null);
 
 export async function login() {
   if (!loadPasskey()) throw new Error('no passkey yet: run `kiu setup-passkey` first (see AGENTS.md setup)');
@@ -54,9 +59,11 @@ export async function login() {
     const token = await lmsToken(page);
     writeSecret(TOKEN, JSON.stringify({ token, savedAt: new Date().toISOString() }));
     await persistCounter();
+    loginStats.ok += 1;
     log(`OK ${mode} login`);
     return token;
   } catch (e) {
+    loginStats.failed += 1;
     await persistCounter();
     await dumpDebug(page, 'login-error');
     throw e;

@@ -8,8 +8,8 @@ Ask an AI agent about your KIU LMS instead of fighting the website:
 > "Where is my Thursday class?"
 
 It reads `lms.kiu.edu.ge` for you: assignments and deadlines, your submissions and scores,
-course materials, announcements, timetable, grades and GPA. It logs in by itself and keeps
-working even though the LMS logs you out every few minutes.
+course materials, announcements, timetable, grades and GPA. It logs in by itself whenever the
+LMS session runs out (about once a day), with no phone involved.
 
 ## Getting started
 
@@ -47,6 +47,31 @@ number approvals on your phone) and from then on you just ask questions.
 - **Your LMS data goes to your AI provider** when you ask about it. The tool strips personal
   number, phone, address and birthday, but grades and course data are sent.
 
+## Best practices
+
+Mostly for running it on a schedule (a sync to your task manager or calendar). The details are in
+[`AGENTS.md`](AGENTS.md#5-best-practices).
+
+- **One passkey, one folder, one machine.** Every sign-in raises the passkey's signature counter
+  (`state/passkey-counter.json`) and Microsoft refuses a passkey whose counter doesn't go up. Never
+  copy `.env`/`state/` to a second machine or folder and run both; register a separate passkey
+  there instead. Never lower the counter.
+- **Runs never overlap.** Every command that can sign in or call the LMS holds a lock in `state/`
+  (`run.lock`); a second run waits up to 5 minutes, then fails with a clear error. A lock left by a
+  crashed run is cleaned up by itself. You don't need your own locking around `kiu`.
+- **The token lasts about 24 hours.** Commands reuse it and sign in again only when the LMS
+  refuses it, so a job every 15 minutes signs in about once a day. Don't schedule `kiu login`.
+- **Schedule lightly:** e.g. homework (`kiu assignments --json`) every 15 minutes, everything
+  else (courses, timetable, grades, materials, announcements, exams) every 6 hours. Treat LMS
+  5xx errors and timeouts as passing; alert only after a few failures in a row.
+- **Keep the guard read-only** for anything unattended. A scheduled job never writes to the LMS.
+- **Watch the auth log.** Each run adds a line to `state/auth-log.jsonl`; `kiu auth-log [days]`
+  shows passkey logins vs reused tokens, failures, and how long tokens lived. Set `KIU_SOURCE`
+  (e.g. `cron`) per caller to tell them apart.
+- **Integrations touch only what they created.** A sync that turns homework into tasks and exams
+  into calendar events keeps its own map of LMS id -> item, changes only those items, and never
+  moves a deadline silently. See the example in `AGENTS.md`.
+
 ## Removing it
 
 1. Delete "kiu-agent" on https://mysignins.microsoft.com/security-info
@@ -55,4 +80,5 @@ number approvals on your phone) and from then on you just ask questions.
 ## For agents and tinkerers
 
 Everything an agent needs is in [`AGENTS.md`](AGENTS.md). The CLI works without an agent too:
-`node src/cli.mjs help`.
+`node src/cli.mjs help`. For your own scripts, `src/text.mjs` turns the LMS's HTML into readable
+text and matches one course across endpoints (or use `--json --text`). Tests: `npm test`.

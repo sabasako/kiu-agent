@@ -3,8 +3,9 @@
 // - Guard: with config.json { "guard": "read-only" } (the default until setup asks), any
 //   endpoint not in READ_ONLY throws before a request leaves the machine. With "off"
 //   everything is allowed; the agent must still get the student's yes for writes.
-// - Re-login: the LMS often drops tokens within minutes, so on 401 the client logs in
-//   again (passkey, ~10 s, no phone) and retries once.
+// - Token: calls reuse the saved LMS token (state/token.json); it lasts about 24 h. Only when the
+//   LMS answers 401 does the client open the browser to log in again (passkey, ~6 s, no phone)
+//   and retry once.
 import { readConfig } from './config.mjs';
 import { READ_ONLY, MARKS_OR_WRITES, endpointOf } from './endpoints.mjs';
 import { login, savedToken } from './login.mjs';
