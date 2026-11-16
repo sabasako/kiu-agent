@@ -23,6 +23,9 @@ export const READ_ONLY = new Set([
   '/lms/learningCourses/group/getMaterialList',
   '/lms/learningCourses/group/announcementList',
   '/lms/learningCourses/group/getEstListComponents',
+  // the student's grade book: the list of courses with results, and one course's marks per component
+  '/card',
+  '/getCardDetails',
   // academic record
   '/registration/getStudentData',
   '/registration/getStudentHistory',
